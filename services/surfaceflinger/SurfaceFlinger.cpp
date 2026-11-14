@@ -637,17 +637,36 @@ void SurfaceFlinger::run() {
 
 // Cyclon (CYC-2007): on a userdebug or eng image, screenshots taken by ADB's shell or root include
 // secure layers, and virtual displays they create are secure, so screencap, screenrecord and scrcpy
-// show FLAG_SECURE windows instead of black. Apps keep Android's rules and user images are unchanged.
+// show FLAG_SECURE windows instead of black. Apps keep Android's rules.
 // setprop persist.cyclon.debug.secure_capture 0 turns it off; DisplayManagerService applies the
 // same rule to the virtual displays it creates for shell or root.
-static bool isDebugSecureCaptureCaller() {
+//
+// Cyclon (CYC-2132): on a user image, only screenshots, and only while Core holds a signed debug
+// grant for this founders phone. Core verifies the grant and sets cyclon.debug.secure_capture_until
+// to the CLOCK_BOOTTIME millisecond the grant ends; its SELinux type lets only Core write it and no
+// app read it, so ADB can't set it. Every screenshot checks it, so captures end with the grant.
+// Virtual displays stay non-secure on user images: a display keeps its secure flag for its life,
+// which could outlast the grant.
+enum class DebugCapture { Screenshot, VirtualDisplay };
+
+// The grant's end as Core wrote it, at most an hour (Core's limit) plus a minute ahead.
+static bool isDebugSecureCaptureGranted() {
+    constexpr int64_t kMaxGrantMs = 61 * 60 * 1000;
+    const int64_t until =
+            base::GetIntProperty<int64_t>("cyclon.debug.secure_capture_until", 0);
+    if (until <= 0) return false;
+    const int64_t now = ns2ms(systemTime(SYSTEM_TIME_BOOTTIME));
+    return now < until && until - now <= kMaxGrantMs;
+}
+
+static bool isDebugSecureCaptureCaller(DebugCapture use) {
     const uid_t uid = IPCThreadState::self()->getCallingUid();
     if (uid != AID_SHELL && uid != AID_ROOT) return false;
-    static const bool debugImage = [] {
-        const std::string type = base::GetProperty("ro.build.type", "user");
-        return type == "userdebug" || type == "eng";
-    }();
-    return debugImage && base::GetBoolProperty("persist.cyclon.debug.secure_capture", true);
+    static const std::string type = base::GetProperty("ro.build.type", "user");
+    if (!base::GetBoolProperty("persist.cyclon.debug.secure_capture", true)) return false;
+    if (type == "userdebug" || type == "eng") return true;
+    return type == "user" && use == DebugCapture::Screenshot &&
+            isDebugSecureCaptureGranted();
 }
 
 sp<IBinder> SurfaceFlinger::createVirtualDisplay(
@@ -660,11 +679,11 @@ sp<IBinder> SurfaceFlinger::createVirtualDisplay(
     // This is to ensure that only root, system, and graphics can request to create a secure
     // display. Secure displays can show secure content so we add an additional restriction on it.
     const uid_t uid = IPCThreadState::self()->getCallingUid();
-    if (isDebugSecureCaptureCaller()) {
+    const bool debugSecure = isDebugSecureCaptureCaller(DebugCapture::VirtualDisplay);
+    if (debugSecure) {
         isSecure = true;
     }
-    if (isSecure && uid != AID_ROOT && uid != AID_GRAPHICS && uid != AID_SYSTEM &&
-        !isDebugSecureCaptureCaller()) {
+    if (isSecure && uid != AID_ROOT && uid != AID_GRAPHICS && uid != AID_SYSTEM && !debugSecure) {
         ALOGE("Only privileged processes can create a secure display");
         return nullptr;
     }
@@ -8299,7 +8318,7 @@ void SurfaceFlinger::captureDisplay(const DisplayCaptureArgs& args,
                            .disableBlur = false,
                            .isGrayscale = captureArgs.grayscale,
                            .isSecure = captureArgs.secureLayerMode == SecureLayerMode::Capture ||
-                                   isDebugSecureCaptureCaller(),
+                                   isDebugSecureCaptureCaller(DebugCapture::Screenshot),
                            .includeProtected =
                                    captureArgs.protectedLayerMode == ProtectedLayerMode::Capture,
                            .preserveDisplayColors = captureArgs.preserveDisplayColors,
@@ -8327,7 +8346,7 @@ void SurfaceFlinger::captureDisplay(DisplayId displayId, const CaptureArgs& args
                                   .disableBlur = false,
                                   .isGrayscale = false,
                                   .isSecure = args.secureLayerMode == SecureLayerMode::Capture ||
-                                          isDebugSecureCaptureCaller(),
+                                          isDebugSecureCaptureCaller(DebugCapture::Screenshot),
                                   .includeProtected = false,
                                   .preserveDisplayColors = args.preserveDisplayColors,
                                   .requireDpuReadback =
@@ -8395,7 +8414,7 @@ void SurfaceFlinger::captureLayers(const LayerCaptureArgs& args,
                            .disableBlur = false,
                            .isGrayscale = captureArgs.grayscale,
                            .isSecure = captureArgs.secureLayerMode == SecureLayerMode::Capture ||
-                                   isDebugSecureCaptureCaller(),
+                                   isDebugSecureCaptureCaller(DebugCapture::Screenshot),
                            .includeProtected =
                                    captureArgs.protectedLayerMode == ProtectedLayerMode::Capture,
                            .preserveDisplayColors = captureArgs.preserveDisplayColors,
