@@ -8338,6 +8338,18 @@ void SurfaceFlinger::captureDisplay(DisplayId displayId, const CaptureArgs& args
         return;
     }
 
+    // Cyclon (CYC-2132): captureDisplayById admits shell, so an explicit request for secure layers
+    // needs CAPTURE_BLACKOUT_CONTENT here too, as on the other capture paths, or the debug rule
+    // above (a dev image, or a signed grant on a user image). Without this, any native helper ADB
+    // starts could ask for secure layers on every phone.
+    const bool debugSecure = isDebugSecureCaptureCaller(DebugCapture::Screenshot);
+    if (args.secureLayerMode == SecureLayerMode::Capture && !debugSecure &&
+        !hasCaptureBlackoutContentPermission()) {
+        ALOGD("Attempting to capture secure layers by display id without CAPTURE_BLACKOUT_CONTENT");
+        invokeScreenCaptureError(PERMISSION_DENIED, captureListener);
+        return;
+    }
+
     ScreenshotArgs screenshotArgs{.captureTypeVariant = displayId,
                                   .snapshotRequest = SnapshotRequestArgs{.uid = gui::Uid::INVALID},
                                   .dataspace = static_cast<ui::Dataspace>(args.dataspace),
@@ -8346,7 +8358,7 @@ void SurfaceFlinger::captureDisplay(DisplayId displayId, const CaptureArgs& args
                                   .disableBlur = false,
                                   .isGrayscale = false,
                                   .isSecure = args.secureLayerMode == SecureLayerMode::Capture ||
-                                          isDebugSecureCaptureCaller(DebugCapture::Screenshot),
+                                          debugSecure,
                                   .includeProtected = false,
                                   .preserveDisplayColors = args.preserveDisplayColors,
                                   .requireDpuReadback =
