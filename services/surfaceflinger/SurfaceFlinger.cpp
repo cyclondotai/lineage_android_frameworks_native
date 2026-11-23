@@ -3349,6 +3349,85 @@ std::optional<compositionengine::CompositionRefreshArgs> SurfaceFlinger::addOutp
     return offloadedRefreshArgs;
 }
 
+// Cyclon (CYC-2975): whether `refreshArgs` composites `output` this frame.
+static bool hasOutput(const compositionengine::CompositionRefreshArgs& refreshArgs,
+                      const compositionengine::Output* output) {
+    return std::any_of(refreshArgs.outputs.begin(), refreshArgs.outputs.end(),
+                       [output](const auto& other) { return other.get() == output; });
+}
+
+void SurfaceFlinger::forceGeometryUpdateForStaleDisplays(
+        compositionengine::CompositionRefreshArgs& mainThreadRefreshArgs,
+        std::optional<compositionengine::CompositionRefreshArgs>& offloadedRefreshArgs) {
+    const auto& displays = FTL_FAKE_GUARD(mStateLock, mDisplays);
+    for (const auto& [_, display] : displays) {
+        if (CC_LIKELY(!display->hasStaleGeometry())) {
+            continue;
+        }
+
+        // A powered-off display does not rebuild its layer stack (Output::rebuildLayerStacks), so
+        // it stays stale until a frame composites it powered on. Raising the flags for it now
+        // would only make the other outputs of that frame rebuild, every frame until then.
+        const auto output = display->getCompositionDisplay();
+        if (!output->getState().isEnabled) {
+            continue;
+        }
+
+        compositionengine::CompositionRefreshArgs* refreshArgs = nullptr;
+        if (hasOutput(mainThreadRefreshArgs, output.get())) {
+            refreshArgs = &mainThreadRefreshArgs;
+        } else if (offloadedRefreshArgs && hasOutput(*offloadedRefreshArgs, output.get())) {
+            refreshArgs = &*offloadedRefreshArgs;
+        } else {
+            // This frame leaves the display out.
+            continue;
+        }
+
+        if (refreshArgs->updatingOutputGeometryThisFrame) {
+            // These outputs rebuild as it is.
+            continue;
+        }
+
+        // The flags count for all the outputs of these refresh args, so the displays composited
+        // with this one rebuild as well. mVisibleRegionsDirty stays as it is: this is no update for
+        // the displays that sit this frame out, and marking them stale for it would make displays
+        // that are out of phase with each other force a rebuild on every frame, forever.
+        SFTRACE_FORMAT_INSTANT("Stale geometry: rebuilding %s", output->getName().c_str());
+        refreshArgs->updatingOutputGeometryThisFrame = true;
+        refreshArgs->updatingGeometryThisFrame = true;
+    }
+}
+
+void SurfaceFlinger::updateDisplaysWithStaleGeometry(
+        bool outputGeometryDirty, bool geometryDirty,
+        const compositionengine::CompositionRefreshArgs& mainThreadRefreshArgs,
+        const std::optional<compositionengine::CompositionRefreshArgs>& offloadedRefreshArgs) {
+    const auto& displays = FTL_FAKE_GUARD(mStateLock, mDisplays);
+    for (const auto& [_, display] : displays) {
+        const auto output = display->getCompositionDisplay();
+
+        const compositionengine::CompositionRefreshArgs* refreshArgs = nullptr;
+        if (hasOutput(mainThreadRefreshArgs, output.get())) {
+            refreshArgs = &mainThreadRefreshArgs;
+        } else if (offloadedRefreshArgs && hasOutput(*offloadedRefreshArgs, output.get())) {
+            refreshArgs = &*offloadedRefreshArgs;
+        }
+
+        // An output applies the geometry flags of its refresh args only while it is enabled.
+        const bool composited = refreshArgs && output->getState().isEnabled;
+        const bool rebuildsLayerStack = composited && refreshArgs->updatingOutputGeometryThisFrame;
+        const bool updatesGeometry = composited && refreshArgs->updatingGeometryThisFrame;
+
+        if (rebuildsLayerStack) {
+            // updatingOutputGeometryThisFrame is never set without updatingGeometryThisFrame, so
+            // the output is up to date with every update so far.
+            display->setHasStaleGeometry(false);
+        } else if (outputGeometryDirty || (geometryDirty && !updatesGeometry)) {
+            display->setHasStaleGeometry(true);
+        }
+    }
+}
+
 std::future<void> SurfaceFlinger::offloadGpuCompositedDisplays(
         compositionengine::CompositionRefreshArgs offloadedRefreshArgs) {
     auto offloadedCompositionPromise = std::make_shared<std::promise<void>>();
@@ -3408,6 +3487,9 @@ CompositeResultsPerDisplay SurfaceFlinger::composite(
     refreshArgs.updatingOutputGeometryThisFrame = mVisibleRegionsDirty;
     refreshArgs.updatingGeometryThisFrame = mGeometryDirty.exchange(false) ||
             mVisibleRegionsDirty || mDrawingState.colorMatrixChanged;
+    // Cyclon (CYC-2975): the geometry update that this frame holds for every display, taken before
+    // forceGeometryUpdateForStaleDisplays raises the flags for the outputs of a stale display.
+    const bool geometryDirty = refreshArgs.updatingGeometryThisFrame;
     refreshArgs.internalDisplayRotationFlags = getFrontInternalDisplayRotationFlags();
 
     if (CC_UNLIKELY(mDrawingState.colorMatrixChanged)) {
@@ -3434,6 +3516,9 @@ CompositeResultsPerDisplay SurfaceFlinger::composite(
     auto optionalOffloadedRefreshArgs =
             addOutputsToRefreshArgs(pacesetterId, refreshArgs, frameTargeters);
 
+    // Cyclon (CYC-2975): a display that missed an earlier geometry update rebuilds now.
+    forceGeometryUpdateForStaleDisplays(refreshArgs, optionalOffloadedRefreshArgs);
+
     constexpr bool kCursorOnly = false;
     const auto layers = mLayerSnapshotBuilder.hasMergedSnapshots()
             ? copyMergedSnapshots(refreshArgs)
@@ -3452,6 +3537,11 @@ CompositeResultsPerDisplay SurfaceFlinger::composite(
 
         prepareLayersForComposition(*optionalOffloadedRefreshArgs, kCursorOnly, offloadedLayers);
     }
+
+    // Cyclon (CYC-2975): the geometry flags are final here: prepareLayersForComposition may have
+    // set mVisibleRegionsDirty after the outputs of this frame were chosen.
+    updateDisplaysWithStaleGeometry(mVisibleRegionsDirty, geometryDirty || mVisibleRegionsDirty,
+                                    refreshArgs, optionalOffloadedRefreshArgs);
 
     std::unordered_set<uint32_t> mainThreadLayerStacks;
     for (auto& output : refreshArgs.outputs) {
@@ -9650,6 +9740,14 @@ void SurfaceFlinger::setVisibleRegionDirtyIfNeeded(
     if (mVisibleRegionsDirty) {
         refreshArgs.updatingOutputGeometryThisFrame = mVisibleRegionsDirty;
         refreshArgs.updatingGeometryThisFrame = mVisibleRegionsDirty;
+        return;
+    }
+
+    // Cyclon (CYC-2975): these outputs rebuild their layer stacks this frame as it is, for a
+    // display that missed a geometry update (forceGeometryUpdateForStaleDisplays). The rebuild
+    // drops their stale output layers before anything reads them, so that case is expected and
+    // there is nothing to look for or to report.
+    if (refreshArgs.updatingOutputGeometryThisFrame) {
         return;
     }
 

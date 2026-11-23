@@ -369,6 +369,32 @@ public:
         mFlinger->setVisibleRegionDirtyIfNeeded(refreshArgs);
     }
 
+    void forceGeometryUpdateForStaleDisplays(
+            compositionengine::CompositionRefreshArgs& mainThreadRefreshArgs,
+            std::optional<compositionengine::CompositionRefreshArgs>& offloadedRefreshArgs) {
+        ftl::FakeGuard guard(kMainThreadContext);
+        mFlinger->forceGeometryUpdateForStaleDisplays(mainThreadRefreshArgs, offloadedRefreshArgs);
+    }
+
+    void updateDisplaysWithStaleGeometry(
+            bool outputGeometryDirty, bool geometryDirty,
+            const compositionengine::CompositionRefreshArgs& mainThreadRefreshArgs,
+            const std::optional<compositionengine::CompositionRefreshArgs>& offloadedRefreshArgs) {
+        ftl::FakeGuard guard(kMainThreadContext);
+        mFlinger->updateDisplaysWithStaleGeometry(outputGeometryDirty, geometryDirty,
+                                                  mainThreadRefreshArgs, offloadedRefreshArgs);
+    }
+
+    static bool hasStaleGeometry(const sp<DisplayDevice>& display) {
+        ftl::FakeGuard guard(kMainThreadContext);
+        return display->hasStaleGeometry();
+    }
+
+    static void setHasStaleGeometry(const sp<DisplayDevice>& display, bool stale) {
+        ftl::FakeGuard guard(kMainThreadContext);
+        display->setHasStaleGeometry(stale);
+    }
+
     auto createVirtualDisplay(const std::string& displayName, bool isSecure,
                               float requestedRefreshRate = 0.0f) {
         static const std::string kTestId =
@@ -1037,6 +1063,12 @@ public:
 
         auto& setPowerMode(hal::PowerMode mode) {
             mCreationArgs.initialPowerMode = mode;
+            return *this;
+        }
+
+        // For virtual displays only. See DisplayDevice::adjustRefreshRate.
+        auto& setRequestedRefreshRate(Fps requestedRefreshRate) {
+            mCreationArgs.requestedRefreshRate = requestedRefreshRate;
             return *this;
         }
 

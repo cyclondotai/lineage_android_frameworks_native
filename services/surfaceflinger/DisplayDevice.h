@@ -208,6 +208,15 @@ public:
     bool isRefreshable() const;
     void tracePowerMode();
 
+    // Cyclon (CYC-2975): whether this display has yet to apply a geometry update. SurfaceFlinger
+    // raises its geometry flags for one frame and for all displays at once, so a display that sat
+    // that frame out (a virtual display out of phase with its refresh rate, or one whose layer
+    // stack another output already has) or was powered off keeps the output layers from before the
+    // update. They may refer to layers that have left the display, so the next frame that
+    // composites this display must rebuild them. See SurfaceFlinger::composite.
+    bool hasStaleGeometry() const REQUIRES(kMainThreadContext) { return mHasStaleGeometry; }
+    void setHasStaleGeometry(bool stale) REQUIRES(kMainThreadContext) { mHasStaleGeometry = stale; }
+
     // Enables layer caching on this DisplayDevice
     void enableLayerCaching(bool enable);
 
@@ -271,6 +280,9 @@ private:
     const bool mIsPrimary;
 
     bool mForceOptimizationPolicyForPower = false;
+
+    // Cyclon (CYC-2975): see hasStaleGeometry. Only the main thread reads or writes it.
+    bool mHasStaleGeometry = false;
 
     uint32_t mFlags = 0;
 

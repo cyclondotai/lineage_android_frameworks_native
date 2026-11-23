@@ -1780,6 +1780,28 @@ private:
     //  to rebuild layer stack instead of crashing.
     void setVisibleRegionDirtyIfNeeded(compositionengine::CompositionRefreshArgs& refreshArgs);
 
+    // Cyclon (CYC-2975): mVisibleRegionsDirty and mGeometryDirty last for one frame and count for
+    // every display, but a frame leaves out the virtual displays that are out of phase with their
+    // refresh rate or share a layer stack, and a powered-off display does not rebuild its layer
+    // stack. Such a display kept its output layers from before the update, and then walked a list
+    // whose layers had moved to another display (CYC-2975: SIGSEGV on the offload thread).
+    // DisplayDevice::hasStaleGeometry remembers the update the display missed.
+    //
+    // Makes the outputs that a display with stale geometry is composited with this frame rebuild
+    // their layer stacks and geometry state. Call after addOutputsToRefreshArgs.
+    void forceGeometryUpdateForStaleDisplays(
+            compositionengine::CompositionRefreshArgs& mainThreadRefreshArgs,
+            std::optional<compositionengine::CompositionRefreshArgs>& offloadedRefreshArgs)
+            REQUIRES(kMainThreadContext);
+    // Records, once the geometry flags of the frame are final, which displays applied its geometry
+    // update and which missed it. `outputGeometryDirty` and `geometryDirty` say what the frame
+    // updated for all displays (not what forceGeometryUpdateForStaleDisplays added for some).
+    void updateDisplaysWithStaleGeometry(
+            bool outputGeometryDirty, bool geometryDirty,
+            const compositionengine::CompositionRefreshArgs& mainThreadRefreshArgs,
+            const std::optional<compositionengine::CompositionRefreshArgs>& offloadedRefreshArgs)
+            REQUIRES(kMainThreadContext);
+
     void setForcedClientCompositionLayerStacks(compositionengine::CompositionRefreshArgs&);
 };
 
