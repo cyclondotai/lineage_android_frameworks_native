@@ -33,6 +33,7 @@
 #include <ui/DynamicDisplayInfo.h>
 #include <ui/ScreenPartStatus.h>
 
+#include <compositionengine/CompositionRefreshArgs.h>
 #include <compositionengine/Display.h>
 #include <compositionengine/LayerFECompositionState.h>
 #include <compositionengine/OutputLayer.h>
@@ -362,6 +363,10 @@ public:
     auto applyOptimizationPolicy(const char* where) {
         ftl::FakeGuard guard(kMainThreadContext);
         return mFlinger->applyOptimizationPolicy(where);
+    }
+
+    void setVisibleRegionDirtyIfNeeded(compositionengine::CompositionRefreshArgs& refreshArgs) {
+        mFlinger->setVisibleRegionDirtyIfNeeded(refreshArgs);
     }
 
     auto createVirtualDisplay(const std::string& displayName, bool isSecure,

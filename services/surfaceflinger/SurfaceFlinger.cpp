@@ -9659,13 +9659,33 @@ void SurfaceFlinger::setVisibleRegionDirtyIfNeeded(
         }
 
         for (const auto* outputLayer : output->getOutputLayersOrderedByZ()) {
-            if (outputLayer->getLayerFE().getCompositionState() == nullptr) {
+            // Cyclon (CYC-2975): an output layer is stale not only when its LayerFE has no
+            // snapshot, but also when the snapshot is one this output no longer includes. A layer
+            // has one LayerFE on whichever display it is, so a layer that left this output for
+            // another display's layer stack has that display's snapshot here, put there for the
+            // thread that composites that display. With this output on the offload thread and
+            // that display on the main thread, the two threads then shared the LayerFE, and the
+            // main thread took the snapshot back while the offload thread still read it.
+            const auto* state = outputLayer->getLayerFE().getCompositionState();
+            if (state == nullptr || !output->includesLayer(state->outputFilter)) {
                 // This is unexpected but instead of crashing, capture traces to disk
                 // and recover gracefully by forcing CE to rebuild layer stack.
-                ALOGE("Output layer %s for display %s %" PRIu64
-                      " has a null snapshot. Forcing mVisibleRegionsDirty",
-                      outputLayer->getLayerFE().getDebugName(), output->getName().c_str(),
-                      output->getDisplayId()->value);
+                // Cyclon (CYC-2975): not every output has a display ID (see Output::getDisplayId).
+                const auto displayIdOpt = output->getDisplayId();
+                const uint64_t displayId = displayIdOpt ? displayIdOpt->value : uint64_t{0};
+                if (state == nullptr) {
+                    ALOGE("Output layer %s for display %s %" PRIu64
+                          " has a null snapshot. Forcing mVisibleRegionsDirty",
+                          outputLayer->getLayerFE().getDebugName(), output->getName().c_str(),
+                          displayId);
+                } else {
+                    ALOGE("Output layer %s for display %s %" PRIu64
+                          " has a snapshot the display no longer includes (layer stack %u, the "
+                          "display's is %u). Forcing mVisibleRegionsDirty",
+                          outputLayer->getLayerFE().getDebugName(), output->getName().c_str(),
+                          displayId, state->outputFilter.layerStack.id,
+                          output->getState().layerFilter.layerStack.id);
+                }
 
                 TransactionTraceWriter::getInstance().invoke(__func__, /* overwrite= */ false);
                 mVisibleRegionsDirty = true;
