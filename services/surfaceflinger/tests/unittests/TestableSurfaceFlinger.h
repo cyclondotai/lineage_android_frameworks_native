@@ -33,6 +33,7 @@
 #include <ui/DynamicDisplayInfo.h>
 #include <ui/ScreenPartStatus.h>
 
+#include <compositionengine/CompositionRefreshArgs.h>
 #include <compositionengine/Display.h>
 #include <compositionengine/LayerFECompositionState.h>
 #include <compositionengine/OutputLayer.h>
@@ -364,6 +365,36 @@ public:
         return mFlinger->applyOptimizationPolicy(where);
     }
 
+    void setVisibleRegionDirtyIfNeeded(compositionengine::CompositionRefreshArgs& refreshArgs) {
+        mFlinger->setVisibleRegionDirtyIfNeeded(refreshArgs);
+    }
+
+    void forceGeometryUpdateForStaleDisplays(
+            compositionengine::CompositionRefreshArgs& mainThreadRefreshArgs,
+            std::optional<compositionengine::CompositionRefreshArgs>& offloadedRefreshArgs) {
+        ftl::FakeGuard guard(kMainThreadContext);
+        mFlinger->forceGeometryUpdateForStaleDisplays(mainThreadRefreshArgs, offloadedRefreshArgs);
+    }
+
+    void updateDisplaysWithStaleGeometry(
+            bool outputGeometryDirty, bool geometryDirty,
+            const compositionengine::CompositionRefreshArgs& mainThreadRefreshArgs,
+            const std::optional<compositionengine::CompositionRefreshArgs>& offloadedRefreshArgs) {
+        ftl::FakeGuard guard(kMainThreadContext);
+        mFlinger->updateDisplaysWithStaleGeometry(outputGeometryDirty, geometryDirty,
+                                                  mainThreadRefreshArgs, offloadedRefreshArgs);
+    }
+
+    static bool hasStaleGeometry(const sp<DisplayDevice>& display) {
+        ftl::FakeGuard guard(kMainThreadContext);
+        return display->hasStaleGeometry();
+    }
+
+    static void setHasStaleGeometry(const sp<DisplayDevice>& display, bool stale) {
+        ftl::FakeGuard guard(kMainThreadContext);
+        display->setHasStaleGeometry(stale);
+    }
+
     auto createVirtualDisplay(const std::string& displayName, bool isSecure,
                               float requestedRefreshRate = 0.0f) {
         static const std::string kTestId =
@@ -387,7 +418,10 @@ public:
                                const std::string& uniqueId,
                                compositionengine::DisplayCreationArgsBuilder& builder) {
         ftl::FakeGuard guard(mFlinger->mStateLock);
-        return mFlinger->acquireVirtualDisplay(resolution, format, uniqueId, builder);
+        // Cyclon (CYC-2975): LineageOS added canAllocateHwcDisplayIdForVDS, which is true unless a
+        // QCOM_UM_FAMILY build decides otherwise. See SurfaceFlinger::processDisplayAdded.
+        return mFlinger->acquireVirtualDisplay(resolution, format, uniqueId, builder,
+                                               /*canAllocateHwcDisplayIdForVDS=*/true);
     }
 
     auto destroyVirtualDisplay(const sp<IBinder>& displayToken) {
@@ -1032,6 +1066,12 @@ public:
 
         auto& setPowerMode(hal::PowerMode mode) {
             mCreationArgs.initialPowerMode = mode;
+            return *this;
+        }
+
+        // For virtual displays only. See DisplayDevice::adjustRefreshRate.
+        auto& setRequestedRefreshRate(Fps requestedRefreshRate) {
+            mCreationArgs.requestedRefreshRate = requestedRefreshRate;
             return *this;
         }
 
