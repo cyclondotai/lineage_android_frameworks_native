@@ -3628,11 +3628,17 @@ CompositeResultsPerDisplay SurfaceFlinger::composite(
         }
     }
 
+    // Cyclon (CYC-2975): no snapshot goes back while the offload thread still composites. The
+    // main thread waited here anyway, one statement later, so this costs nothing. The offloaded
+    // outputs should hold no LayerFE of the main thread's layers (setVisibleRegionDirtyIfNeeded),
+    // but should one ever do, it now reads a snapshot that stays in place instead of a null one.
+    if (optionalOffloadedRefreshArgs) {
+        offloadedCompositionFuture->wait();
+    }
     if (!mLayerSnapshotBuilder.hasMergedSnapshots()) {
         moveSnapshotsFromCompositionArgs(layers);
     }
     if (optionalOffloadedRefreshArgs) {
-        offloadedCompositionFuture->wait();
         moveSnapshotsFromCompositionArgs(offloadedLayers);
     }
     mTimeStats->recordFrameDuration(pacesetterTarget.frameBeginTime().ns(), systemTime());
