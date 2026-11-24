@@ -418,7 +418,10 @@ public:
                                const std::string& uniqueId,
                                compositionengine::DisplayCreationArgsBuilder& builder) {
         ftl::FakeGuard guard(mFlinger->mStateLock);
-        return mFlinger->acquireVirtualDisplay(resolution, format, uniqueId, builder);
+        // Cyclon (CYC-2975): LineageOS added canAllocateHwcDisplayIdForVDS, which is true unless a
+        // QCOM_UM_FAMILY build decides otherwise. See SurfaceFlinger::processDisplayAdded.
+        return mFlinger->acquireVirtualDisplay(resolution, format, uniqueId, builder,
+                                               /*canAllocateHwcDisplayIdForVDS=*/true);
     }
 
     auto destroyVirtualDisplay(const sp<IBinder>& displayToken) {
